@@ -3,7 +3,7 @@ name = dbboot
 CFLAGS := -Wall
 
 srcs = src/dbboot.c src/puff.c
-objs = $(srcs:%.c=%.o) $(libfdt-sharedlib)
+objs = $(srcs:%.c=%.o)
 
 all:$(name)
 

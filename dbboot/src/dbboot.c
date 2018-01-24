@@ -34,7 +34,6 @@
 #include <limits.h>
 
 #include "puff.h"
-#include "libfdt.h"
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 #define le16_to_cpu(val) (val)
