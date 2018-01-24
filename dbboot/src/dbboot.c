@@ -1,7 +1,4 @@
 /*
- *
- * abootimg-update-dtb
- *
  * Copyright (C) 2018 Linaro Limited
  * Copyright (C) 2018 Loic Poulain <loic.poulain@linaro.org>
  *
@@ -474,6 +471,12 @@ int main(int argc, char *argv[])
 		default:
 			break;
 		}
+	}
+
+	if (!type) {
+		fprintf(stderr, "you must specify a blob type\n");
+		usage();
+		return -EINVAL;
 	}
 
 	path_boot = argv[optind++];
