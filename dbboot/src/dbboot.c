@@ -420,6 +420,22 @@ static int dbboot_fdt_update(int fd_boot, int fd_fdt, int fd_dst)
 	return 0;
 }
 
+static void usage(void)
+{
+	printf("Usage: dbboot [options] <bootimg>\n" \
+	       "options:\n" \
+	       "   -x, --extract <arg>\n" \
+	       "         Extract blob, valid blob types are:\n" \
+	       "                 dtb: device-tree blob\n"  \
+	       "   -u, --update <arg> [newblob]\n" \
+	       "         Update blob, valid blob types are:\n" \
+	       "                 dtb: device-tree blob\n"  \
+	       "   -o, --out <arg>\n" \
+	       "         Output file\n" \
+	       );
+
+}
+
 static const struct option main_options[] = {
 	{ "help", no_argument, NULL, 'h' },
 	{ "extract", required_argument, NULL, 'x' },
@@ -454,7 +470,7 @@ int main(int argc, char *argv[])
 			path_out = optarg;
 			break;
 		case 'h':
-		/*	usage(); */
+			usage();
 			return EXIT_SUCCESS;
 		default:
 			break;
