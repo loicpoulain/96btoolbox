@@ -90,7 +90,6 @@ struct aboot_hdr {
 	uint32_t	kernel_tags_addr;
 	uint32_t	page_size;
 	uint64_t	unused;
-	uint32_t	os_version;
 	uint8_t		name[16];
 	uint8_t		cmdline[512];
 	uint64_t	id;
@@ -416,6 +415,26 @@ static int dbboot_fdt_update(int fd_boot, int fd_fdt, int fd_dst)
 	return 0;
 }
 
+static int dbboot_info(int fd_boot)
+{
+	struct aboot_hdr *aboot;
+
+	aboot = aboot_load_fromfd(fd_boot);
+	if (!aboot)
+		return -EINVAL;
+
+
+	printf("name:    %s\n", aboot->name);
+	printf("aboot size:    %ld bytes\n", aboot_size(aboot));
+	printf("kernel.gz+dtb: %d bytes\n", le32_to_cpu(aboot->kernel_size));
+	printf("ramdisk:       %d bytes\n", le32_to_cpu(aboot->ramdisk_size));
+	printf("second:        %d bytes\n", le32_to_cpu(aboot->second_size));
+	printf("page size:     %d bytes\n", le32_to_cpu(aboot->page_size));
+	printf("cmdline: %s\n", aboot->cmdline);
+
+	return 0;
+}
+
 static void usage(void)
 {
 	printf("Usage: dbboot [options] <bootimg>\n" \
@@ -426,6 +445,7 @@ static void usage(void)
 	       "   -u, --update <arg> [newblob]\n" \
 	       "         Update blob, valid blob types are:\n" \
 	       "                 dtb: device-tree blob\n"  \
+	       "   -i, --info\n" \
 	       "   -o, --out <arg>\n" \
 	       "         Output file\n" \
 	       );
@@ -437,18 +457,19 @@ static const struct option main_options[] = {
 	{ "extract", required_argument, NULL, 'x' },
 	{ "update", required_argument, NULL, 'u' },
 	{ "out", required_argument, NULL, 'o' },
+	{ "info", required_argument, NULL, 'i' },
 	{ },
 };
 
 int main(int argc, char *argv[])
 {
-	bool extract = false, update = false;
+	bool extract = false, update = false, info = false;
 	int fd_boot = -1, fd_out = -1;
 	char *path_boot = NULL, *path_out = NULL;
 	char *type = NULL;
 
 	for (;;) {
-		int opt = getopt_long(argc, argv, ":x:u:o:h", main_options,
+		int opt = getopt_long(argc, argv, ":x:u:o:hi", main_options,
 				      NULL);
 		if (opt < 0)
 			break;
@@ -465,6 +486,9 @@ int main(int argc, char *argv[])
 		case 'o':
 			path_out = optarg;
 			break;
+		case 'i':
+			info = true;
+			break;
 		case 'h':
 			usage();
 			return EXIT_SUCCESS;
@@ -473,7 +497,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (!type) {
+	if (!info && !type) {
 		fprintf(stderr, "you must specify a blob type\n");
 		usage();
 		return -EINVAL;
@@ -503,7 +527,10 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (!strcmp(type, "dtb") || !strcmp(type, "fdt")) {
+	if (info) {
+		dbboot_info(fd_boot);
+	} else if (!strcmp(type, "dtb") || !strcmp(type, "fdt")) {
+		/* TODO rework this */
 		if (extract) {
 			if (fd_out < 0)
 				fd_out = STDOUT_FILENO;
