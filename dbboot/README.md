@@ -3,7 +3,7 @@ Dragonboard boot image tool
 
 ### Usage
 
-dbboot <abootimg> --extract|--update <blobtype> [--out outfile]
+`dbboot <abootimg> <--extract|--update|--info> <blobtype> [--out outfile]`
 
 ### Example
 
@@ -19,6 +19,11 @@ or\
 
 - Update command line\
 `$ dbboot /dev/mmcblkp8 -u cmdline "root=/dev/mmcblk0p10 console=ttyMSM0,115200n8"`
+
+- Update kernel (Linux, u-boot...)\
+`$ dbboot /dev/mmcblkp8 -u kernel Image.gz`\
+or\
+`$ gzip Image -c | dbboot /dev/mmcblkp8 -u kernel`
 
 ### Dragonboard boot image (abootimg) format
 

@@ -1,6 +1,6 @@
 name = dbboot
 
-CFLAGS := -Wall
+CFLAGS := -Wall -g
 
 srcs = src/dbboot.c src/puff.c
 objs = $(srcs:%.c=%.o)

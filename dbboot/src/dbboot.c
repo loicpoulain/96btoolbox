@@ -15,6 +15,8 @@
  *
  */
 
+/* TODO: save mem + fix multiple missing pointer releases */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -111,6 +113,21 @@ struct dtb_hdr {
 } __attribute__((packed)); /* Big endian */
 uint32_t magic_dtb = 0xd00dfeed;
 
+static int read2(int fd, void *buf, size_t blen)
+{
+	int ret, size = 0;
+
+	do {
+		ret = read(fd, buf + size, blen - size);
+		if (ret <= 0)
+			break;
+
+		size += ret;
+	} while (size < blen);
+
+	return size;
+}
+
 static ssize_t gzip_size(struct gzip_hdr *gzip, size_t gzip_len)
 {
 	unsigned long max_ulong = -1;
@@ -174,9 +191,12 @@ static bool kernel_is_gzip(void *kernel)
 	return true;
 }
 
-static ssize_t kernel_size(void *kernel)
+static ssize_t kernelgz_size(void *kernel)
 {
-	return gzip_size(kernel, UINT_MAX);
+	if (kernel_is_gzip(kernel))
+		return gzip_size(kernel, UINT_MAX);
+	else
+		return 0;
 }
 
 static bool kernel_has_appended_dtb(void *kernel)
@@ -186,7 +206,7 @@ static bool kernel_has_appended_dtb(void *kernel)
 	if (!kernel_is_gzip(kernel))
 		return false;
 
-	dtb = kernel + kernel_size(kernel);
+	dtb = kernel + kernelgz_size(kernel);
 
 	/* Check DTB magic */
 	if (be32_to_cpu(dtb->magic) != magic_dtb)
@@ -222,7 +242,7 @@ static void *aboot_load_fromfd(int fd_aboot)
 	if (!aboot)
 		return NULL;
 
-	ret = read(fd_aboot, aboot, sizeof(*aboot));
+	ret = read2(fd_aboot, aboot, sizeof(*aboot));
 	if (ret != sizeof(*aboot)) {
 		fprintf(stderr, "invalid boot image\n");
 		free(aboot);
@@ -240,7 +260,7 @@ static void *aboot_load_fromfd(int fd_aboot)
 		return NULL;
 
 	to_read = aboot_size(aboot) - sizeof(struct aboot_hdr);
-	ret = read(fd_aboot, (void *)aboot + sizeof(struct aboot_hdr), to_read);
+	ret = read2(fd_aboot, (void *)aboot + sizeof(struct aboot_hdr), to_read);
 	if (ret != to_read) {
 		fprintf(stderr, "invalid boot image\n");
 		free(aboot);
@@ -248,6 +268,54 @@ static void *aboot_load_fromfd(int fd_aboot)
 	}
 
 	return aboot;
+}
+
+#define MBYTE 1000000
+
+static void *kernel_load_fromfd(int fd_kernel)
+{
+	struct gzip_hdr *gzip;
+	size_t size = sizeof(*gzip);
+	void *kernel;
+	int ret, off;
+
+	gzip = malloc(size);
+	if (!gzip)
+		return NULL;
+
+	ret = read2(fd_kernel, gzip, sizeof(*gzip));
+	if (ret != sizeof(*gzip)) {
+		fprintf(stderr, "invalid kernel.gz image\n");
+		free(gzip);
+		return NULL;
+	}
+
+	if (!kernel_is_gzip(gzip)) {
+		fprintf(stderr, "not a valid kernel gzip image\n");
+		free(gzip);
+		return NULL;
+	}
+
+	kernel = gzip;
+	size = sizeof(*gzip);
+	off = sizeof(*gzip);
+
+	do {
+		size = size + 1 * MBYTE;
+		kernel = realloc(kernel, size);
+		if (!kernel) {
+			fprintf(stderr, "kernel memory alloc error\n");
+			free(gzip);
+			return NULL;
+		}
+
+		ret = read2(fd_kernel, kernel + off, size - off);
+		if (ret != (size - off))
+			break;
+		off += ret;
+	} while(1);
+
+	return kernel;
 }
 
 static void *aboot_get_dtb(struct aboot_hdr *aboot)
@@ -259,7 +327,7 @@ static void *aboot_get_dtb(struct aboot_hdr *aboot)
 	page_sz = le32_to_cpu(aboot->page_size);
 	kernel = (void *)aboot + page_sz;
 
-	kernel_sz = kernel_size(kernel);
+	kernel_sz = kernelgz_size(kernel);
 	if (kernel_sz < 0)
 		return NULL;
 
@@ -308,7 +376,7 @@ static void *aboot_update_dtb(void *boot, void *dtb, bool force)
 	if (!kernel)
 		return NULL;
 
-	kernel_sz = kernel_size(kernel);
+	kernel_sz = kernelgz_size(kernel);
 
 	old_dtb = aboot_get_dtb(old_aboot);
 	if (!old_dtb)
@@ -359,6 +427,56 @@ static void *aboot_update_dtb(void *boot, void *dtb, bool force)
 	return aboot;
 }
 
+static void *aboot_update_kernel(void *boot, void *kernel)
+{
+	struct aboot_hdr *aboot, *old_aboot = boot;
+	ssize_t page_sz, kernel_sz, align_sz;
+	void *old_kernel, *dtb, *ptr;
+	int diff;
+
+	page_sz = le32_to_cpu(old_aboot->page_size);
+	old_kernel = aboot_get_kernel(old_aboot);
+	kernel_sz = kernelgz_size(kernel);
+	dtb = aboot_get_dtb(old_aboot);
+
+	diff = kernel_sz - kernelgz_size(old_kernel);
+
+	aboot = malloc(aboot_size(old_aboot) + diff + page_sz);
+	if (!aboot)
+		return NULL;
+
+	/* Now we can generate our new abootimg */
+	ptr = aboot;
+
+	/* copy first block, aboot hdr */
+	memcpy(ptr, old_aboot, page_sz);
+	ptr += page_sz;
+
+	/* copy our new kernel */
+	memcpy(ptr, kernel, kernel_sz);
+	ptr += kernel_sz;
+
+	/* copy appended dtb */
+	memcpy(ptr, dtb, dtb_size(dtb));
+	ptr += dtb_size(dtb);
+
+	/* modify kernel size (kernel.gz + dtb) */
+	aboot->kernel_size = cpu_to_le32(kernel_sz + dtb_size(dtb));
+
+	/* align on page */
+	align_sz = page_sz - le32_to_cpu(aboot->kernel_size) % page_sz;
+	if (align_sz != page_sz) {
+		memset(ptr, 0, align_sz);
+		ptr += align_sz;
+	}
+
+	/* copy remaining data */
+	memcpy(ptr, aboot_get_ramdisk(old_aboot),
+	       aboot_get_end(old_aboot) - aboot_get_ramdisk(old_aboot));
+
+	return aboot;
+}
+
 static void *dtb_load_fromfd(int fd_dtb)
 {
 	struct dtb_hdr *dtb;
@@ -368,7 +486,7 @@ static void *dtb_load_fromfd(int fd_dtb)
 	if (!dtb)
 		return NULL;
 
-	ret = read(fd_dtb, dtb, sizeof(*dtb));
+	ret = read2(fd_dtb, dtb, sizeof(*dtb));
 	if (ret != sizeof(*dtb)) {
 		fprintf(stderr, "invalid DTB\n");
 		free(dtb);
@@ -386,7 +504,7 @@ static void *dtb_load_fromfd(int fd_dtb)
 		return NULL;
 
 	to_read = dtb_size(dtb) - sizeof(struct dtb_hdr);
-	ret = read(fd_dtb, (void *)dtb + sizeof(struct dtb_hdr), to_read);
+	ret = read2(fd_dtb, (void *)dtb + sizeof(struct dtb_hdr), to_read);
 	if (ret != to_read) {
 		fprintf(stderr, "invalid DTB image\n");
 		free(dtb);
@@ -480,6 +598,60 @@ static int dbboot_cmdline_update(int fd_boot, char *cmdline, int fd_dst)
 	return 0;
 }
 
+static int dbboot_kernel_extract(int fd_boot, int fd_out)
+{
+	struct aboot_hdr *aboot;
+	void *kernel;
+	int kernel_sz;
+
+	aboot = aboot_load_fromfd(fd_boot);
+	if (!aboot)
+		return -EINVAL;
+
+	kernel = aboot_get_kernel(aboot);
+	if (!(kernel_sz = kernelgz_size(kernel))) /* non gz+dtb */
+		kernel_sz = le32_to_cpu(aboot->kernel_size);
+
+	write(fd_out, aboot_get_kernel(aboot), kernel_sz);
+
+	free(aboot);
+
+	return 0;
+}
+
+static int dbboot_kernel_update(int fd_boot, int fd_kernel, int fd_dst)
+{
+	struct aboot_hdr *aboot, *new_aboot;
+	void *kernel;
+
+	aboot = aboot_load_fromfd(fd_boot);
+	if (!aboot)
+		return -EINVAL;
+
+	kernel = kernel_load_fromfd(fd_kernel);
+	if (!kernel) {
+		free(aboot);
+		return -EINVAL;
+	}
+
+	new_aboot = aboot_update_kernel(aboot, kernel);
+	if (!aboot) {
+		fprintf(stderr, "unable to update kernel\n");
+		free(aboot);
+		return -EINVAL;
+	}
+	free(aboot);
+
+	if (fd_boot == fd_dst)
+		lseek(fd_dst, 0, 0);
+
+	write(fd_dst, new_aboot, aboot_size(new_aboot));
+
+	free(new_aboot);
+
+	return 0;
+}
+
 static int dbboot_info(int fd_boot)
 {
 	struct aboot_hdr *aboot;
@@ -519,10 +691,12 @@ static void usage(void)
 	       "   -x, --extract <arg>\n" \
 	       "         Extract blob, valid blob types are:\n" \
 	       "                 dtb: device-tree blob\n"  \
+	       "                 kernel: kernel.gz blob\n"  \
 	       "                 cmdline: command line string\n"  \
 	       "   -u, --update <arg> [file|\"cmdline\"]\n" \
 	       "         Update blob, valid blob types are:\n" \
 	       "                 dtb: device-tree blob\n"  \
+	       "                 kernel: kernel.gz blob\n"  \
 	       "                 cmdline: command line string\n"  \
 	       "   -i, --info\n" \
 	       "   -o, --out <arg>\n" \
@@ -536,7 +710,7 @@ static const struct option main_options[] = {
 	{ "extract", required_argument, NULL, 'x' },
 	{ "update", required_argument, NULL, 'u' },
 	{ "out", required_argument, NULL, 'o' },
-	{ "info", required_argument, NULL, 'i' },
+	{ "info", no_argument, NULL, 'i' },
 	{ },
 };
 
@@ -620,6 +794,8 @@ int main(int argc, char *argv[])
 			ret = dbboot_cmdline_extract(fd_boot, fd_out);
 		} else if (!strcmp("dtb", type)) {
 			ret = dbboot_fdt_extract(fd_boot, fd_out);
+		} else if (!strcmp("kernel", type)) {
+			ret = dbboot_kernel_extract(fd_boot, fd_out);
 		} else {
 			fprintf(stderr, "invalid blob type (%s)\n", type);
 			ret = -EINVAL;
@@ -634,7 +810,7 @@ int main(int argc, char *argv[])
 			if (optind < argc) /* cmdline string passed as arg */
 				strcpy(cmdline, argv[optind++]);
 			else /* STDIN ? */
-				read(STDIN_FILENO, cmdline, sizeof(cmdline));
+				read2(STDIN_FILENO, cmdline, sizeof(cmdline));
 
 			ret = dbboot_cmdline_update(fd_boot, cmdline, fd_out);
 		} else if (!strcmp("dtb", type)) {
@@ -653,6 +829,21 @@ int main(int argc, char *argv[])
 
 			ret = dbboot_fdt_update(fd_boot, fd_in, fd_out);
 
+		} else if (!strcmp("kernel", type)){
+			char *kernel_path = argv[optind++];
+			int fd_in = STDIN_FILENO;
+
+			if (kernel_path) {
+				fd_in = open(kernel_path, O_RDONLY);
+				if (fd_in < 0) {
+					fprintf(stderr, "unable to open %s\n",
+					        kernel_path);
+					close(fd_boot);
+					return -EINVAL;
+				}
+			}
+
+			ret = dbboot_kernel_update(fd_boot, fd_in, fd_out);
 		} else {
 			fprintf(stderr, "invalid blob type (%s)\n", type);
 			ret = -EINVAL;
@@ -661,7 +852,6 @@ int main(int argc, char *argv[])
 		ret = -EINVAL;
 		usage();
 	}
-
 
 	return ret;
 }
