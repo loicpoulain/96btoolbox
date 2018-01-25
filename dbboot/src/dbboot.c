@@ -382,6 +382,8 @@ static int dbboot_fdt_extract(int fd_boot, int fd_fdt)
 
 	write(fd_fdt, dtb, dtb_size(dtb));
 
+	free(aboot);
+
 	return 0;
 }
 
@@ -415,6 +417,41 @@ static int dbboot_fdt_update(int fd_boot, int fd_fdt, int fd_dst)
 	return 0;
 }
 
+static int dbboot_cmdline_extract(int fd_boot, int fd_out)
+{
+	struct aboot_hdr *aboot;
+
+	aboot = aboot_load_fromfd(fd_boot);
+	if (!aboot)
+		return -EINVAL;
+
+	write(fd_out, aboot->cmdline, strlen((char *)aboot->cmdline) + 1);
+
+	free(aboot);
+
+	return 0;
+}
+
+static int dbboot_cmdline_update(int fd_boot, char *cmdline, int fd_dst)
+{
+	struct aboot_hdr *aboot;
+
+	aboot = aboot_load_fromfd(fd_boot);
+	if (!aboot)
+		return -EINVAL;
+
+	memcpy(aboot->cmdline, cmdline, strlen(cmdline) + 1);
+
+	if (fd_boot == fd_dst)
+		lseek(fd_dst, 0, 0);
+
+	write(fd_dst, aboot, aboot_size(aboot));
+
+	free(aboot);
+
+	return 0;
+}
+
 static int dbboot_info(int fd_boot)
 {
 	struct aboot_hdr *aboot;
@@ -437,14 +474,16 @@ static int dbboot_info(int fd_boot)
 
 static void usage(void)
 {
-	printf("Usage: dbboot [options] <bootimg>\n" \
+	printf("Usage: dbboot <bootimg> [options]\n" \
 	       "options:\n" \
 	       "   -x, --extract <arg>\n" \
 	       "         Extract blob, valid blob types are:\n" \
 	       "                 dtb: device-tree blob\n"  \
-	       "   -u, --update <arg> [newblob]\n" \
+	       "                 cmdline: command line string\n"  \
+	       "   -u, --update <arg> [file|\"cmdline\"]\n" \
 	       "         Update blob, valid blob types are:\n" \
 	       "                 dtb: device-tree blob\n"  \
+	       "                 cmdline: command line string\n"  \
 	       "   -i, --info\n" \
 	       "   -o, --out <arg>\n" \
 	       "         Output file\n" \
@@ -464,7 +503,7 @@ static const struct option main_options[] = {
 int main(int argc, char *argv[])
 {
 	bool extract = false, update = false, info = false;
-	int fd_boot = -1, fd_out = -1;
+	int fd_boot = -1, fd_out = -1, ret;
 	char *path_boot = NULL, *path_out = NULL;
 	char *type = NULL;
 
@@ -509,15 +548,6 @@ int main(int argc, char *argv[])
 		return -EINVAL;
 	}
 
-	if (path_boot) {
-		fd_boot = open(path_boot, update ? O_RDWR: O_RDONLY);
-		if (fd_boot < 0) {
-			fprintf(stderr, "unable to open boot image %s\n",
-				path_boot);
-			return -EINVAL;
-		}
-	}
-
 	if (path_out) {
 		fd_out = open(path_out, O_WRONLY|O_CREAT, 0644);
 		if (fd_out < 0) {
@@ -527,20 +557,52 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	if (path_boot) {
+		if (update && (fd_out < 0))
+			fd_boot = open(path_boot, O_RDWR);
+		else
+			fd_boot = open(path_boot, O_RDONLY);
+
+		if (fd_boot < 0) {
+			fprintf(stderr, "unable to open boot image %s\n",
+				path_boot);
+			return -EINVAL;
+		}
+	}
+
 	if (info) {
 		dbboot_info(fd_boot);
-	} else if (!strcmp(type, "dtb") || !strcmp(type, "fdt")) {
-		/* TODO rework this */
-		if (extract) {
-			if (fd_out < 0)
-				fd_out = STDOUT_FILENO;
-			return dbboot_fdt_extract(fd_boot, fd_out);
-		} else if (update) {
+	} else if (extract) {
+		if (fd_out < 0)
+			fd_out = STDOUT_FILENO;
+
+		if (!strcmp("cmdline", type)) {
+			ret = dbboot_cmdline_extract(fd_boot, fd_out);
+		} else if (!strcmp("dtb", type)) {
+			ret = dbboot_fdt_extract(fd_boot, fd_out);
+		} else {
+			fprintf(stderr, "invalid blob type (%s)\n", type);
+			ret = -EINVAL;
+		}
+	} else if (update) {
+		if (fd_out < 0)
+			fd_out = fd_boot;
+
+		if (!strcmp("cmdline", type)) {
+			char cmdline[512] = {};
+
+			if (optind < argc) /* cmdline string passed as arg */
+				strcpy(cmdline, argv[optind++]);
+			else /* STDIN ? */
+				read(STDIN_FILENO, cmdline, sizeof(cmdline));
+
+			ret = dbboot_cmdline_update(fd_boot, cmdline, fd_out);
+		} else if (!strcmp("dtb", type)) {
 			char *dtb_path = argv[optind++];
 			int fd_in = STDIN_FILENO;
 
 			if (dtb_path) {
-				fd_in = open(dtb_path, O_RDONLY, 0644);
+				fd_in = open(dtb_path, O_RDONLY);
 				if (fd_in < 0) {
 					fprintf(stderr, "unable to open %s\n",
 					        dtb_path);
@@ -549,15 +611,17 @@ int main(int argc, char *argv[])
 				}
 			}
 
-			if (fd_out < 0)
-				fd_out = fd_boot;
+			ret = dbboot_fdt_update(fd_boot, fd_in, fd_out);
 
-			return dbboot_fdt_update(fd_boot, fd_in, fd_out);
+		} else {
+			fprintf(stderr, "invalid blob type (%s)\n", type);
+			ret = -EINVAL;
 		}
 	} else {
-		fprintf(stderr, "unknown blob type: %s", type);
+		ret = -EINVAL;
+		usage();
 	}
 
 
-	return EXIT_SUCCESS;
+	return ret;
 }

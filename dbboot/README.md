@@ -17,6 +17,9 @@ or\
 or\
 `$ dbboot /dev/mmcblkp8 -u dtb dtb.img`
 
+- Update command line\
+`$ dbboot /dev/mmcblkp8 -u cmdline "root=/dev/mmcblk0p10 console=ttyMSM0,115200n8"`
+
 ### Dragonboard boot image (abootimg) format
 
 `+-----------------+`\
