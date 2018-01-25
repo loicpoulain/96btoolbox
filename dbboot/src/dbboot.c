@@ -163,10 +163,38 @@ static ssize_t gzip_size(struct gzip_hdr *gzip, size_t gzip_len)
 	return (ptr - (void *)gzip);
 }
 
+static bool kernel_is_gzip(void *kernel)
+{
+	struct gzip_hdr *gzip = kernel;
+
+	if (memcmp(&gzip->magic, magic_gzip, sizeof(magic_gzip))) {
+		return false;
+	}
+
+	return true;
+}
+
 static ssize_t kernel_size(void *kernel)
 {
 	return gzip_size(kernel, UINT_MAX);
 }
+
+static bool kernel_has_appended_dtb(void *kernel)
+{
+	struct dtb_hdr *dtb;
+
+	if (!kernel_is_gzip(kernel))
+		return false;
+
+	dtb = kernel + kernel_size(kernel);
+
+	/* Check DTB magic */
+	if (be32_to_cpu(dtb->magic) != magic_dtb)
+		return false;
+
+	return true;
+}
+
 
 static ssize_t dtb_size(void *dtb)
 {
@@ -455,15 +483,27 @@ static int dbboot_cmdline_update(int fd_boot, char *cmdline, int fd_dst)
 static int dbboot_info(int fd_boot)
 {
 	struct aboot_hdr *aboot;
+	void *kernel;
 
 	aboot = aboot_load_fromfd(fd_boot);
 	if (!aboot)
 		return -EINVAL;
 
+	kernel = aboot_get_kernel(aboot);
 
-	printf("name:    %s\n", aboot->name);
 	printf("aboot size:    %ld bytes\n", aboot_size(aboot));
-	printf("kernel.gz+dtb: %d bytes\n", le32_to_cpu(aboot->kernel_size));
+
+	if (kernel_is_gzip(kernel) && kernel_has_appended_dtb(kernel)) {
+		printf("kernel.gz+dtb: %d bytes\n",
+			le32_to_cpu(aboot->kernel_size));
+	} else if (kernel_is_gzip(kernel)) {
+		printf("kernel.gz:     %d bytes (no appended DTB)\n",
+			le32_to_cpu(aboot->kernel_size));
+	} else {
+		printf("kernel:        %d bytes (non-gzip, no appended DTB)\n",
+			le32_to_cpu(aboot->kernel_size));
+	}
+
 	printf("ramdisk:       %d bytes\n", le32_to_cpu(aboot->ramdisk_size));
 	printf("second:        %d bytes\n", le32_to_cpu(aboot->second_size));
 	printf("page size:     %d bytes\n", le32_to_cpu(aboot->page_size));
