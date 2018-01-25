@@ -496,6 +496,7 @@ static void *dtb_load_fromfd(int fd_dtb)
 	/* Check DTB magic */
 	if (be32_to_cpu(dtb->magic) != magic_dtb) {
 		fprintf(stderr, "invalid DTB (bad magic)\n");
+		free(dtb);
 		return NULL;
 	}
 
@@ -517,70 +518,78 @@ static void *dtb_load_fromfd(int fd_dtb)
 static int dbboot_fdt_extract(int fd_boot, int fd_fdt)
 {
 	void *aboot, *dtb;
+	int ret;
 
 	aboot = aboot_load_fromfd(fd_boot);
 	if (!aboot)
 		return -EINVAL;
 
 	dtb = aboot_get_dtb(aboot);
-	if (!dtb)
+	if (!dtb) {
+		free(aboot);
 		return -EINVAL;
+	}
 
-	write(fd_fdt, dtb, dtb_size(dtb));
+	ret = write(fd_fdt, dtb, dtb_size(dtb));
+	ret = (ret == dtb_size(dtb)) ? 0 : -EINVAL;
 
 	free(aboot);
 
-	return 0;
+	return ret;
 }
 
 static int dbboot_fdt_update(int fd_boot, int fd_fdt, int fd_dst)
 {
 	void *aboot, *new_aboot, *dtb;
+	int ret = -EINVAL;
 
 	aboot = aboot_load_fromfd(fd_boot);
 	if (!aboot)
 		return -EINVAL;
 
 	dtb = dtb_load_fromfd(fd_fdt);
-	if (!dtb) {
-		free(aboot);
-		return -EINVAL;
-	}
+	if (!dtb)
+		goto error_dtb;
 
 	new_aboot = aboot_update_dtb(aboot, dtb, false);
 	if (!new_aboot)
-		return -EINVAL;
+		goto error_update;
 
 	if (fd_boot == fd_dst)
 		lseek(fd_dst, 0, 0);
 
-	write(fd_dst, new_aboot, aboot_size(new_aboot));
+	ret = write(fd_dst, new_aboot, aboot_size(new_aboot));
+	ret = (ret == aboot_size(new_aboot)) ? 0 : -EINVAL;
 
 	free(new_aboot);
-	free(aboot);
+error_update:
 	free(dtb);
-
-	return 0;
+error_dtb:
+	free(aboot);
+	return ret;
 }
 
 static int dbboot_cmdline_extract(int fd_boot, int fd_out)
 {
 	struct aboot_hdr *aboot;
+	int ret;
 
 	aboot = aboot_load_fromfd(fd_boot);
 	if (!aboot)
 		return -EINVAL;
 
-	write(fd_out, aboot->cmdline, strlen((char *)aboot->cmdline) + 1);
+	ret = write(fd_out, aboot->cmdline, strlen((char *)aboot->cmdline) + 1);
+	ret = (ret == strlen((char *)aboot->cmdline) + 1) ? 0 : -EINVAL;
 
 	free(aboot);
 
-	return 0;
+	return ret;
 }
 
 static int dbboot_cmdline_update(int fd_boot, char *cmdline, int fd_dst)
 {
 	struct aboot_hdr *aboot;
+	int ret;
 
 	aboot = aboot_load_fromfd(fd_boot);
 	if (!aboot)
@@ -591,18 +600,19 @@ static int dbboot_cmdline_update(int fd_boot, char *cmdline, int fd_dst)
 	if (fd_boot == fd_dst)
 		lseek(fd_dst, 0, 0);
 
-	write(fd_dst, aboot, aboot_size(aboot));
+	ret = write(fd_dst, aboot, aboot_size(aboot));
+	ret = (ret == aboot_size(aboot)) ? 0 : -EINVAL;
 
 	free(aboot);
 
-	return 0;
+	return ret;
 }
 
 static int dbboot_kernel_extract(int fd_boot, int fd_out)
 {
+	int kernel_sz, ret;
 	struct aboot_hdr *aboot;
 	void *kernel;
-	int kernel_sz;
 
 	aboot = aboot_load_fromfd(fd_boot);
 	if (!aboot)
@@ -612,44 +622,59 @@ static int dbboot_kernel_extract(int fd_boot, int fd_out)
 	if (!(kernel_sz = kernelgz_size(kernel))) /* non gz+dtb */
 		kernel_sz = le32_to_cpu(aboot->kernel_size);
 
-	write(fd_out, aboot_get_kernel(aboot), kernel_sz);
+	ret = write(fd_out, aboot_get_kernel(aboot), kernel_sz);
+	ret = (ret == kernel_sz) ? 0 : -EINVAL;
 
 	free(aboot);
 
-	return 0;
+	return ret;
 }
 
 static int dbboot_kernel_update(int fd_boot, int fd_kernel, int fd_dst)
 {
 	struct aboot_hdr *aboot, *new_aboot;
+	struct dtb_hdr *dtb;
 	void *kernel;
+	int ret = -EINVAL;
 
 	aboot = aboot_load_fromfd(fd_boot);
 	if (!aboot)
 		return -EINVAL;
 
 	kernel = kernel_load_fromfd(fd_kernel);
-	if (!kernel) {
-		free(aboot);
-		return -EINVAL;
-	}
+	if (!kernel)
+		goto error_kernel;
 
 	new_aboot = aboot_update_kernel(aboot, kernel);
-	if (!aboot) {
-		fprintf(stderr, "unable to update kernel\n");
+	if (!aboot)
+		goto error_update;
+
+	/* check if new kernel has an appended DTB */
+	dtb = kernel + kernelgz_size(kernel);
+	if (be32_to_cpu(dtb->magic) == magic_dtb) {
 		free(aboot);
-		return -EINVAL;
+		aboot = new_aboot;
+
+		new_aboot = aboot_update_dtb(aboot, dtb, true);
+		if (!new_aboot)
+			goto error_update;
 	}
-	free(aboot);
 
 	if (fd_boot == fd_dst)
 		lseek(fd_dst, 0, 0);
 
-	write(fd_dst, new_aboot, aboot_size(new_aboot));
+	ret = write(fd_dst, new_aboot, aboot_size(new_aboot));
+	if (ret != aboot_size(new_aboot)) {
+		fprintf(stderr, "error during kernel update\n");
+		ret = -EINVAL;
+	}
 
 	free(new_aboot);
-
-	return 0;
+error_update:
+	free(kernel);
+error_kernel:
+	free(aboot);
+	return ret;
 }
 
 static int dbboot_info(int fd_boot)
